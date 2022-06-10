@@ -60,59 +60,64 @@ uint64_t getCyclicDist(uint64_t page1, uint64_t page2)
  * @param currPageAdd the page of the current frame (updated during traversal
  *        reaching correct value when reaching a leaf.)
  */
-void findNewFrameHelper(word_t currFrame, uint64_t currParentAdd, uint64_t currDepth,
+void findNewFrameHelper(word_t currFrame, uint64_t currParentAdd, int currDepth,
                         word_t* maxFrame, word_t* emptyFrame, uint64_t* emptyParentAdd,
                         word_t* maxDistFrame, uint64_t* maxDistParentAdd, uint64_t* maxDistPage,
                         uint64_t virtualAdd, word_t lastCreatedFrame, uint64_t currPageAdd)
 {
   // if an empty frame was found, no need to keep traversing the table
   if (*emptyFrame != 0)
-      return;
+    return;
   bool isEmpty = true;
   word_t value;
   // go over each frame currFrame is pointing to. Check for maxFrame, and if
   // it's a leaf check maxDistFrame. Else, recurse into it.
   for (uint64_t i = 0; i < PAGE_SIZE; i++)
-  {
+    {
       PMread (currFrame * PAGE_SIZE + i, &value);
       if (value != 0)
-      {
-        if (value > *maxFrame)
-          *maxFrame = value;
-        isEmpty = false;
-        uint64_t ithPageAdd = (currPageAdd << OFFSET_WIDTH) + i;
-        if (currDepth == TABLES_DEPTH - 1)
         {
-          uint64_t currDistance = getCyclicDist ((virtualAdd >> OFFSET_WIDTH), ithPageAdd);
-          uint64_t maxDistance = getCyclicDist ((virtualAdd >> OFFSET_WIDTH), *maxDistPage);
-          if (currDistance > maxDistance || *maxDistFrame == 0)
-          {
-            *maxDistParentAdd = currFrame * PAGE_SIZE + i;
-            *maxDistFrame = value;
-            *maxDistPage = ithPageAdd;
-          }
-          continue;
+          if (value > *maxFrame)
+            *maxFrame = value;
+          isEmpty = false;
+          uint64_t ithPageAdd = (currPageAdd << OFFSET_WIDTH) + i;
+          if (currDepth == TABLES_DEPTH - 1)
+            {
+              uint64_t currDistance = getCyclicDist ((virtualAdd >> OFFSET_WIDTH), ithPageAdd);
+              uint64_t maxDistance = getCyclicDist ((virtualAdd >> OFFSET_WIDTH), *maxDistPage);
+              if (currDistance > maxDistance || *maxDistFrame == 0)
+                {
+                  *maxDistParentAdd = currFrame * PAGE_SIZE + i;
+                  *maxDistFrame = value;
+                  *maxDistPage = ithPageAdd;
+                }
+              continue;
+            }
+          else
+            {
+              findNewFrameHelper (value,
+                                  currFrame * PAGE_SIZE + i,
+                                  currDepth + 1, maxFrame,
+                                  emptyFrame, emptyParentAdd, maxDistFrame, maxDistParentAdd,
+                                  maxDistPage, virtualAdd, lastCreatedFrame, ithPageAdd);
+            }
         }
-        else
-        {
-            findNewFrameHelper (value,
-                                currFrame * PAGE_SIZE + i,
-                                currDepth + 1, maxFrame,
-                                emptyFrame, emptyParentAdd, maxDistFrame, maxDistParentAdd,
-                                maxDistPage, virtualAdd, lastCreatedFrame, ithPageAdd);
-        }
-      }
-  }
-  // check the empty frame isn't the frame last created.
+    }
+  // only update emptyFrame if the empty frame isn't the last created frame
   if (isEmpty & (currFrame != lastCreatedFrame))
-  {
-    *emptyFrame = currFrame;
-    *emptyParentAdd = currParentAdd;
-    return;
-  }
+    {
+      *emptyFrame = currFrame;
+      *emptyParentAdd = currParentAdd;
+      return;
+    }
 }
 
-
+/**
+ * @brief Finds a new frame to use for the given virtual address.
+ * @param frame save the frame number here
+ * @param virtualAdd the virtual address to find a frame for
+ * @param lastCreatedFrame the frame last created in the process. default is 0.
+ */
 void findNewFrame (word_t *frame, uint64_t virtualAdd, word_t lastCreatedFrame)
 {
   word_t maxFrame = 0;
@@ -126,20 +131,21 @@ void findNewFrame (word_t *frame, uint64_t virtualAdd, word_t lastCreatedFrame)
                       &maxDistPage, virtualAdd, lastCreatedFrame, 0);
   // order of importance: Empty -> Max -> Evict
   if (emptyFrame != 0)
-  {
-    PMwrite (emptyParentAdd, 0);
-    *frame = emptyFrame;
-  }
+    {
+      PMwrite (emptyParentAdd, 0);
+      *frame = emptyFrame;
+    }
   else if (maxFrame + 1 < NUM_FRAMES)
-  {
-      *frame = maxFrame + 1;
-  }
+    {
+        clearFrame (maxFrame + 1);
+        *frame = maxFrame + 1;
+    }
   else
-  {
-    PMwrite (maxDistParentAdd, 0);
-    PMevict (maxDistFrame, maxDistPage);
-    clearFrame (maxDistFrame);
-    *frame = maxDistFrame;
+    {
+      PMwrite (maxDistParentAdd, 0);
+      PMevict (maxDistFrame, maxDistPage);
+      clearFrame (maxDistFrame);
+      *frame = maxDistFrame;
     }
 }
 
@@ -157,19 +163,23 @@ void translateVirtualAdd(uint64_t virtualAdd, word_t* frameToSave)
   uint64_t depth = TABLES_DEPTH;
   for (uint64_t level = depth; level > 0; level--)
     {
-      currValue = getOffset(virtualAdd >> (level * OFFSET_WIDTH));
+      currValue = getOffset (virtualAdd >> (level * OFFSET_WIDTH));
       currFrame = add1;
-      PMread(currFrame * PAGE_SIZE + currValue, &add1);
+      PMread (currFrame * PAGE_SIZE + currValue, &add1);
       if (add1 == 0)
-      {
-        // if frame not found, find one to use
-        findNewFrame (&add1, virtualAdd, currFrame);
-        PMwrite (currFrame * PAGE_SIZE + currValue, add1);
+        {
+          // if frame not found, find one to use
+          findNewFrame (&add1, virtualAdd, currFrame);
+          PMwrite (currFrame * PAGE_SIZE + currValue, add1);
         }
     }
   PMrestore (add1, virtualAdd >> OFFSET_WIDTH);
   // store result in frameToSave
-  PMread (currFrame * PAGE_SIZE + getOffset (virtualAdd >> OFFSET_WIDTH), frameToSave);
+  if (TABLES_DEPTH != 0)
+    {
+      PMread (currFrame * PAGE_SIZE
+              + getOffset (virtualAdd >> OFFSET_WIDTH), frameToSave);
+    }
 }
 
 /**
@@ -190,7 +200,7 @@ int VMread(uint64_t virtualAddress, word_t* value)
 {
   if (virtualAddress > VIRTUAL_MEMORY_SIZE - 1)
     return 0;
-  word_t frame;
+  word_t frame = 0;
   translateVirtualAdd (virtualAddress, &frame);
   PMread (frame * PAGE_SIZE + getOffset (virtualAddress), value);
   return 1;
@@ -200,9 +210,8 @@ int VMwrite(uint64_t virtualAddress, word_t value)
 {
   if (virtualAddress > VIRTUAL_MEMORY_SIZE - 1)
     return 0;
-  word_t frame;
+  word_t frame = 0;
   translateVirtualAdd (virtualAddress, &frame);
   PMwrite (frame * PAGE_SIZE + getOffset (virtualAddress), value);
   return 1;
 }
-
